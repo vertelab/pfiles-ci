@@ -486,6 +486,11 @@ jobs:
             # kordes, vilket addons-path, vilken databas, och de sista
             # relevanta loggraderna.
             reason="$(grep -E "pfiles-install: (ENV|MODULE)" /tmp/mod.log 2>/dev/null | head -1 | cut -c1-150)"
+            # Om klassningen sager MODULE men loggen inte namner modulen, ar
+            # det miljön som brast. Ta med första sparet sa det syns.
+            case "$reason" in
+              *MODULE*) reason="$reason || $(grep -E "^(AssertionError|ValueError|KeyError|AttributeError|odoo\.tools\.convert\.ParseError)" /tmp/mod.log 2>/dev/null | tail -1 | cut -c1-120)" ;;
+            esac
             [ -n "$reason" ] || reason="$(grep -E "ERROR|CRITICAL|Traceback|not found|cannot be located" /tmp/mod.log 2>/dev/null | head -1 | cut -c1-150)"
             echo "::notice::$name (${{ matrix.edition }}) rc=$rc :: ${reason:-ingen orsak i loggen}"
             case "$rc" in
