@@ -67,7 +67,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: vertelab/pfiles-ci
-          ref: ${{ inputs.ref || github.job_workflow_sha }}
+          ref: ${{ inputs.ref || 'v1' }}
           path: .pfiles-ci-src
           sparse-checkout: scripts
           persist-credentials: false
@@ -120,7 +120,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: vertelab/pfiles-ci
-          ref: ${{ inputs.ref || github.job_workflow_sha }}
+          ref: ${{ inputs.ref || 'v1' }}
           path: .pfiles-ci-src
           sparse-checkout: scripts
           persist-credentials: false
@@ -157,7 +157,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: vertelab/pfiles-ci
-          ref: ${{ inputs.ref || github.job_workflow_sha }}
+          ref: ${{ inputs.ref || 'v1' }}
           path: .pfiles-ci-src
           sparse-checkout: scripts
           persist-credentials: false
@@ -307,7 +307,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: vertelab/pfiles-ci
-          ref: ${{ inputs.ref || github.job_workflow_sha }}
+          ref: ${{ inputs.ref || 'v1' }}
           path: .pfiles-ci-src
           sparse-checkout: scripts
           persist-credentials: false
