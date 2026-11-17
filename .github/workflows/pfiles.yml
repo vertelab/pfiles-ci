@@ -5,7 +5,6 @@ name: pfiles
 # Anropas fran varje repo, pinnat till en version:
 #
 #   jobs:
-jobs:
 #     pfiles:
 #       uses: vertelab/pfiles-ci/.github/workflows/pfiles.yml@v1
 #
