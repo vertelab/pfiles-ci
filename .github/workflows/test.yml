@@ -1,0 +1,36 @@
+name: test
+
+# The scripts are shared by every calling repo, so they are tested here on
+# every change. A defect that reaches a caller reaches all of them.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "preprocess==2.0.0"
+
+      - name: Syntax check
+        run: |
+          python -m py_compile scripts/*.py
+          bash -n scripts/pfiles-install.sh
+          echo "syntax OK"
+
+      - name: Run the tests
+        run: python3 tests/test_pfiles.py

@@ -1,32 +1,32 @@
 #!/usr/bin/env python3
-"""pfiles-check — hitta filer som borde vara p-filer men inte är det.
+"""pfiles-check -- find files that should be p-files but are not.
 
-Kontrollerar en modulkatalog (eller ett helt repo) och rapporterar:
+Checks a module directory (or a whole repo) and reports:
 
-  MISSING_SOURCE  genererad fil utan .p-källa  (FEL)
-  STALE           utdata skiljer sig från expansionen (FEL)
-  MANUAL_PFILE    p-fil, men ingen genererad fil  (FEL)
-  ORPHAN_PFILE    .p-fil utan giltig utdata  (FEL)
-  UNEXPLAINED     källfil utan p-motsvarighet och inte vitlistad (FEL)
-  PAIRED          .p.x + x finns — OK
-  ALLOWED         vitlistad — OK
-  NOT_APPLICABLE  saknar stöd för preprocess — OK
+  MISSING_SOURCE  generated file without a .p-source  (ERROR)
+  STALE           output differs from the expansion   (ERROR)
+  MANUAL_PFILE    p-file, but no generated file       (ERROR)
+  ORPHAN_PFILE    .p-file without valid output        (ERROR)
+  UNEXPLAINED     source file with no p-counterpart, not allow-listed (ERROR)
+  PAIRED          .p.x + x present -- OK
+  ALLOWED         allow-listed -- OK
+  NOT_APPLICABLE  preprocess has no support for it -- OK
 
-Utgåvespecifika säkerhetskontroller (Odoo 20 bytte form på ir.model.access):
+Edition-specific security checks (Odoo 20 changed the shape of ir.model.access):
 
-  WRONG_SECURITY_FORMAT  säkerhetsfilen har fel form för utgåvan (FEL)
-  UNLISTED_SECURITY_FILE manifestet laddar en säkerhetsfil utgåvan inte kan läsa (FEL)
-  BAD_DOMAIN_NAME        domän använder namn utanför utgåvans eval-kontext (FEL)
+  WRONG_SECURITY_FORMAT  the security file has the wrong shape for the edition (ERROR)
+  UNLISTED_SECURITY_FILE the manifest loads a security file the edition cannot read (ERROR)
+  BAD_DOMAIN_NAME        the domain uses a name outside the edition's eval context (ERROR)
 
-Användning:
-  ./pfiles-check.py --version 18.0 /path/till/modul [...]
-  ./pfiles-check.py --version 18.0 --json /path/till/repo
+Usage:
+  ./pfiles-check.py --version 18.0 /path/to/module [...]
+  ./pfiles-check.py --version 18.0 --json /path/to/repo
   ./pfiles-check.py --version 18.0 --print-allow /path | sudo tee .../.pfiles-allow
 
-Vitlista: <repo- eller modulrot>/.pfiles-allow — en sökväg per rad,
-relativ till roten. '#' inleder kommentar. Glöm inte '!' vid generering.
+Allow-list: <repo- or module root>/.pfiles-allow -- one path per line,
+relative to the root. '#' starts a comment. Do not forget '!' when generating.
 
-Exit: 0 = inga fel, 1 = fel hittade, 2 = användningsfel.
+Exit: 0 = no errors, 1 = errors found, 2 = invalid usage.
 """
 from __future__ import annotations
 
@@ -41,14 +41,14 @@ import subprocess
 import sys
 import tempfile
 
-# Filändelser som preprocess hanterar (jfr /skill:odoo-pfiles)
+# File extensions preprocess handles (cf. /skill:odoo-pfiles)
 PREPROCESS_EXTS = (".py", ".xml", ".js", ".csv", ".sh", ".html", ".htm", ".pl",
                    ".rb", ".tcl", ".c", ".h", ".cpp", ".java", ".php")
-# Filer som alltid är källor, aldrig genereras
+# Files that are always sources, never generated
 EXCLUDED_NAMES = {"__init__.py", "__manifest__.py", "__manifest__.p.py"}
 EXCLUDED_DIRS = {".git", "__pycache__", ".tox", ".venv", "venv", "node_modules",
                  ".idea", ".mypy_cache", ".pytest_cache"}
-# p-fil-ändelser: (p-ändelse, utdata-ändelse). Ordningen har betydelse — längsta först.
+# p-file extensions: (p-suffix, output-suffix). Order matters -- longest first.
 PFILE_SUFFIXES = [(".p.py", ".py"), (".p.xml", ".xml"), (".p.js", ".js"),
                   (".p.csv", ".csv"), (".p.sh", ".sh"), (".p.html", ".html"),
                   (".p.htm", ".htm"), (".p.pl", ".pl"), (".p.rb", ".rb"),
@@ -59,23 +59,23 @@ OK, ERR = "OK", "ERROR"
 
 
 # ---------------------------------------------------------------------------
-# Utgåveprofiler
+# Edition profiles
 #
-# Säkerhetsdatan för ir.model.access bytte form i Odoo 20.0:
+# The security data for ir.model.access changed shape in Odoo 20.0:
 #
 #   18.0/19.0                20.0
-#   fil  ir.model.access.csv  ir.access.csv      <- FILNAMNET avgör modellen
-#   model_id:id               model_id           <- naket modellnamn
-#   group_id:id               group_id/id
-#   perm_read/write/create/unlink   operation     <- 'crud' etc.
-#   (ir.rule separat)         domain-kolumn
+#   file ir.model.access.csv ir.access.csv      <- THE FILENAME decides the model
+#   model_id:id              model_id           <- bare model name
+#   group_id:id              group_id/id
+#   perm_read/write/create/unlink   operation   <- 'crud' etc.
+#   (ir.rule separate)       domain column
 #
-# Filnamnet är inte kosmetik: Odoo 20 läser modellnamnet ur filnamnets prefix
-# FÖRE innehållet (convert_csv_import). En ny-format fil som ligger i
-# ir.model.access.csv fäller alltså fortfarande med KeyError: 'ir.model.access'.
+# The filename is not cosmetic: Odoo 20 reads the model name from the filename
+# prefix BEFORE the content (convert_csv_import). A new-format file living in
+# ir.model.access.csv therefore still fails with KeyError: 'ir.model.access'.
 #
-# Verifierat 2026-11-16: 18/19 har tabellen ir_model_access, 20.0 har ir_access.
-# OCB 19.0 är gammalt format (ingen ir_access.py) — bara 20.0 är nytt.
+# Verified 2026-11-16: 18/19 have the table ir_model_access, 20.0 has ir_access.
+# OCB 19.0 is the old format (no ir_access.py) -- only 20.0 is new.
 # ---------------------------------------------------------------------------
 EDITION_PROFILES = {
     "18.0": {
@@ -101,16 +101,16 @@ EDITION_PROFILES = {
     },
 }
 
-# Filer som hör till den gamla respektive nya säkerhetsformen. Används för att
-# upptäcka en fil som ligger kvar i fel form för utgåvan.
+# Files belonging to the old and new security shape respectively. Used to
+# detect a file left in the wrong shape for the edition.
 SECURITY_FILENAMES = {"ir.model.access.csv", "ir.access.csv"}
 
-# Domännamn som INTE finns i 20.0:s eval-kontext (_eval_context ger bara
-# user, time, company_ids, company_id). 'uid' ger NameError vid installation.
+# Domain names that do NOT exist in 20.0's eval context (_eval_context gives
+# only user, time, company_ids, company_id). 'uid' raises NameError on install.
 BAD_DOMAIN_NAMES_MODERN = {"uid": "user.id"}
 
 def edition_profile(version):
-    """Profil för en utgåva. Okänd utgåva ger None (hoppa över formatkontroll)."""
+    """Profile for an edition. Unknown edition gives None (skip format checks)."""
     return EDITION_PROFILES.get(version)
 
 
@@ -125,10 +125,10 @@ def pfile_split(name):
 def pepfile_hint(name):
     """a.xml -> a.p.xml, a.py -> a.p.py.
 
-    Konventionen är att '.p' sätts IN före ändelsen, inte efter hela namnet.
-    Det måste stämma med pfile_split: 'a.p.py' -> 'a.py'. Att föreslå
-    'a.py.p.py' (som en tidigare version gjorde) ger pfile_split 'a.py.py'
-    och skapar ett nytt fel i stället för att lösa det.
+    The convention is that '.p' goes IN before the extension, not after the
+    whole name. It must agree with pfile_split: 'a.p.py' -> 'a.py'. Suggesting
+    'a.py.p.py' (as an earlier version did) makes pfile_split return 'a.py.py'
+    and creates a new error instead of solving the old one.
     """
     for psuffix, suffix in PFILE_SUFFIXES:
         if name.lower().endswith(suffix):
@@ -141,11 +141,11 @@ def is_preprocessable(name):
 
 
 def find_roots(paths, explicit):
-    """Hitta modulrötter (katalog med __manifest__.py eller *.p.py) under paths."""
+    """Find module roots (a directory with __manifest__.py or *.p.py) under paths."""
     if explicit:
         return [os.path.abspath(p) for p in paths]
 
-    # Är en angiven sökväg redan en modulrot?
+    # Is a given path already a module root?
     roots = []
     for p in paths:
         p = os.path.abspath(p)
@@ -158,12 +158,12 @@ def find_roots(paths, explicit):
             dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDED_DIRS)
             if "__manifest__.py" in filenames:
                 roots.append(dirpath)
-                dirnames[:] = []   # moduler ligger inte inuti moduler
+                dirnames[:] = []   # modules are not nested inside modules
     return roots
 
 
 def load_allow(root):
-    """Läs .pfiles-allow från root eller repo-överliggande katalog."""
+    """Read .pfiles-allow from root or an enclosing directory."""
     allow, source = set(), None
     candidate = root
     for _ in range(4):                        # root, root/.., root/../.., ...
@@ -188,15 +188,15 @@ def rel(root, path):
 
 
 # ---------------------------------------------------------------------------
-# Säkerhetskontroller per utgåva (2.2, 2.3, 2.4)
+# Security checks per edition
 # ---------------------------------------------------------------------------
 
 def load_manifest(root):
-    """Läs modulens manifest som en dict. None om det inte går.
+    """Read the module manifest as a dict. None if it cannot be read.
 
-    Föredrar __manifest__.py; faller tillbaka på __manifest__.p.py eftersom
-    p-filen är källan när den finns. literal_eval fungerar på p-manifestet:
-    villkoren ligger i kommentarer (# #if), inte i Pythonsyntax.
+    Prefers __manifest__.py; falls back to __manifest__.p.py because the
+    p-file is the source when it exists. literal_eval works on the p-manifest:
+    the conditionals live in comments (# #if), not in Python syntax.
     """
     for name in ("__manifest__.py", "__manifest__.p.py"):
         path = os.path.join(root, name)
@@ -213,7 +213,7 @@ def load_manifest(root):
 
 
 def csv_header(path):
-    """Första raden i en CSV som en lista fält, eller None."""
+    """The first row of a CSV as a list of fields, or None."""
     try:
         with open(path, encoding="utf-8-sig", newline="") as fh:
             first = fh.readline()
@@ -235,20 +235,20 @@ def csv_rows(path):
 
 
 def security_findings(root, version):
-    """Kontrollera säkerhetsfilerna mot utgåvans profil.
+    """Check the security files against the edition's profile.
 
-    Tre fel (alla ERROR, alla skulle fälla en installation):
+    Three defects (all ERROR, all would fail an installation):
 
-      WRONG_SECURITY_FORMAT  filen har fel form för utgåvan
-                             (t.ex. perm_read-kolumner i 20.0, eller
-                              operation/domain i 18.0)
-      UNLISTED_SECURITY_FILE en säkerhetsfil ligger i modulen men laddas inte
-                             av manifestets data — död vikt, och i värsta fall
-                             en tyst överraskning när någon lägger till den
-      BAD_DOMAIN_NAME        domän använder ett namn som inte finns i
-                             utgåvans eval-kontext (uid i 20.0)
+      WRONG_SECURITY_FORMAT  the file has the wrong shape for the edition
+                             (e.g. perm_read columns in 20.0, or
+                              operation/domain in 18.0)
+      UNLISTED_SECURITY_FILE a security file sits in the module but is not
+                             loaded by the manifest's data -- dead weight, and
+                             at worst a silent trap when someone adds it
+      BAD_DOMAIN_NAME        the domain uses a name that is not in the
+                             edition's eval context (uid in 20.0)
 
-    Returnerar (findings, info) där info är en dict för --json.
+    Returns (findings, info) where info is a dict for --json.
     """
     profile = edition_profile(version)
     findings = []
@@ -265,11 +265,12 @@ def security_findings(root, version):
                 present.append(name)
     info["present"] = present
 
-    # Vilka säkerhetsfiler manifestet faktiskt laddar. Bara de kan falla en
-    # installation — en fil som ligger i security/ men inte listas laddas
-    # aldrig, och ska därför inte bedömas (spec: "Fil för annan utgåva finns
-    # men laddas inte"). Det är själva poängen med D1: bada filerna ligger
-    # sida vid sida och manifestet valjer.
+    # Which security files the manifest actually loads. Only those can fail
+    # an installation -- a file in security/ that is not listed is never
+    # loaded and must therefore not be judged (spec: "A file for another
+    # edition exists but is not loaded"). That is the whole point of the
+    # side-by-side layout: both files sit next to each other and the
+    # manifest chooses.
     manifest = load_manifest(root) or {}
     listed_secs = set()
     for entry in manifest.get("data", []) or []:
@@ -277,11 +278,13 @@ def security_findings(root, version):
            os.path.basename(entry) in SECURITY_FILENAMES:
             listed_secs.add(entry)
 
-    # 2.2 — rätt format för utgåvan, för både utdata och p-källa
+    # Correct format for the edition, for both output and p-source.
     expected = profile["security_columns"]
-    # En .p.csv vars utdata redan rapporterats ger samma fel två gånger. Vi
-    # hoppar över p-källan när dess utdatafil ligger i samma katalog — felet
-    # är detsamma och användaren ska åtgärda paret, inte två filer.
+
+    # A .p.csv whose output has already been reported yields the same
+    # defect twice. Skip the p-source when its output file sits in the
+    # same directory -- the defect is the same and the user fixes the
+    # pair, not two files.
     reported = set()
     for name in present:
         if name.endswith(".p.csv"):
@@ -292,41 +295,42 @@ def security_findings(root, version):
         if name in reported:
             continue
         path = os.path.join(secdir, name)
-        # Bara den fil manifestet laddar bedöms. Den andra utgåvans fil är
-        # harmlös och ska inte ge ett fel — annars kan D1 aldrig användas.
+        # Only the file the manifest loads is judged. The other edition's
+        # file is harmless and must not raise an error -- otherwise the
+        # side-by-side layout can never be used.
         if ("security/" + name) not in listed_secs:
             continue
         header = csv_header(path)
         if header is None:
-            continue                     # tom/headerlös — annan kontroll fångar det
-        # En .p.csv är en källa; dess header är samma oavsett utgåva bara om
-        # villkoren styr raderna. Vi kontrollerar bara utdatafilerna, plus
-        # p-källan för att ge ett tidigt besked.
+            continue                     # empty/headerless -- another check catches it
+        # A .p.csv is a source; its header is the same across editions only
+        # if the conditionals steer the rows. We check the output files,
+        # plus the p-source to give an early warning.
         looks_legacy = "perm_read" in header
         looks_modern = "operation" in header
         if profile["security_format"] == "modern" and looks_legacy:
             findings.append((ERR, "WRONG_SECURITY_FORMAT", rel(root, path),
                              f"{name} har gammalt format (perm_*-kolumner) men "
-                             f"utgåvan {version} kräver {profile['security_filename']} "
+                             f"edition {version} requires {profile['security_filename']} "
                              f"med kolumnerna {','.join(expected)}"))
         elif profile["security_format"] == "legacy" and looks_modern:
             findings.append((ERR, "WRONG_SECURITY_FORMAT", rel(root, path),
                              f"{name} har nytt format (operation/domain) men "
-                             f"utgåvan {version} kräver {profile['security_filename']}"))
+                             f"edition {version} requires {profile['security_filename']}"))
         elif not looks_legacy and not looks_modern and header != list(expected):
             findings.append((ERR, "WRONG_SECURITY_FORMAT", rel(root, path),
-                             f"{name} har oväntad header: {','.join(header)} — "
-                             f"väntade {','.join(expected)}"))
+                             f"{name} has an unexpected header: {','.join(header)} -- "
+                             f"expected {','.join(expected)}"))
 
-        # Fel filnamn för formen: nytt format i ir.model.access.csv fäller
+        # Wrong filename for the shape: new format in ir.model.access.csv fails
         # fortfarande eftersom Odoo 20 tar modellen ur filnamnet.
         if looks_modern and name == "ir.model.access.csv":
             findings.append((ERR, "WRONG_SECURITY_FORMAT", rel(root, path),
                              f"nytt format ligger i {name} — Odoo 20 tar modellen ur "
-                             f"FILNAMNET före innehållet, så filen måste heta "
+                             f"the FILENAME before the content, so the file must be named "
                              f"ir.access.csv"))
 
-    # 2.3 — bara den valda säkerhetsfilen får ligga i manifestets data
+    # Only the chosen security file may sit in the manifest's data
     manifest = load_manifest(root)
     if manifest is not None:
         data = manifest.get("data") or []
@@ -339,18 +343,18 @@ def security_findings(root, version):
             manifest_name = "__manifest__.p.py"
         if len(listed) > 1:
             findings.append((ERR, "UNLISTED_SECURITY_FILE", manifest_name,
-                             f"manifestet listar flera säkerhetsfiler: "
+                             f"the manifest lists several security files: "
                              f"{', '.join(listed)} — bara {want} kan laddas"))
         for entry in listed:
             if os.path.basename(entry) != profile["security_filename"]:
                 findings.append((ERR, "UNLISTED_SECURITY_FILE", manifest_name,
-                                 f"manifestet laddar {entry}, men utgåvan {version} "
-                                 f"kräver {want}"))
-        # En säkerhetsfil som finns men inte listas är död vikt. I sig inte
-        # ett fel (den laddas aldrig), men den är en tyst fälla: läggs den
-        # till i data utan att byta form fäller den. Rapporteras som varning.
+                                 f"the manifest loads {entry}, but edition {version} "
+                                 f"requires {want}"))
+        # A security file that exists but is not listed is dead weight. Not
+        # a defect in itself (it is never loaded), but a silent trap: add it
+        # to data without changing its shape and it fails. Reported as a warning.
 
-    # 2.4 — domännamn som inte finns i utgåvans eval-kontext
+    # Domain names that do not exist in the edition's eval context
     if profile["security_format"] == "modern":
         for name in present:
             path = os.path.join(secdir, name)
@@ -361,11 +365,11 @@ def security_findings(root, version):
             for lineno, row in enumerate(csv_rows(path), start=2):
                 if len(row) <= idx:
                     continue
-                # Odoo skriver domänen med kommatecken UTAN citattecken
-                # ([('user_id','=',user.id)]), så csv-modulen delar upp den i
-                # flera kolumner. En naiv läsning av row[idx] ser bara första
-                # fragmentet ("[('user_id'") och missar 'uid' i svansen.
-                # Slå ihop allt från idx och framåt — det är domänen.
+                # Odoo writes the domain with commas WITHOUT quotes
+                # ([('user_id','=',user.id)]), so the csv module splits it
+                # into several columns. A naive row[idx] read sees only the
+                # first fragment ("[('user_id'") and misses uid in the tail.
+                # Join everything from idx onward -- that is the domain.
                 dom = ",".join(row[idx:])
                 if not dom.strip():
                     continue
@@ -373,14 +377,14 @@ def security_findings(root, version):
                     if re.search(rf"\b{re.escape(bad)}\b", dom):
                         findings.append((ERR, "BAD_DOMAIN_NAME",
                                          f"{rel(root, path)}:{lineno}",
-                                         f"domänen använder '{bad}' som inte finns i "
+                                         f"the domain uses '{bad}' which is not in "
                                          f"20.0:s eval-kontext (user, time, "
-                                         f"company_ids, company_id) — använd '{good}'"))
+                                         f"company_ids, company_id) -- use '{good}'"))
     return findings, info
 
 
 def expand_ok(preprocess, pfile, outfile, version, repo, tmpdir, cache):
-    """Returnerar (status, detalj) där status är OK/STALE/ERROR."""
+    """Returns (status, detail) where status is OK/STALE/ERROR."""
     if preprocess is None:
         return "ERROR", "preprocess saknas — kan inte verifiera expansion"
     if pfile not in cache:
@@ -401,7 +405,7 @@ def expand_ok(preprocess, pfile, outfile, version, repo, tmpdir, cache):
             with open(candidate, "rb") as fh:
                 cache[pfile] = (OK, fh.read())
         except OSError as exc:
-            cache[pfile] = ("ERROR", f"kunde inte läsa expansionen: {exc}")
+            cache[pfile] = ("ERROR", f"could not read the expansion: {exc}")
         if os.path.exists(candidate):
             os.remove(candidate)
     status, value = cache[pfile]
@@ -411,9 +415,9 @@ def expand_ok(preprocess, pfile, outfile, version, repo, tmpdir, cache):
         with open(outfile, "rb") as fh:
             actual = fh.read()
     except OSError as exc:
-        return "ERROR", f"kunde inte läsa utdata: {exc}"
+        return "ERROR", f"could not read the output: {exc}"
     if actual != value:
-        return "STALE", "utdata skiljer sig från expansionen — kör om preprocess"
+        return "STALE", "output differs from the expansion -- re-run preprocess"
     return OK, "matchar expansionen"
 
 
@@ -438,9 +442,10 @@ def check_root(root, version, exclude_allow, preprocess, tmpdir):
         name = os.path.basename(f)
         target, psuffix = pfile_split(name)
         relpath = rel(root, f)
-        # Vitlistan är modul-kvalificerad: "modul/models/x.py". En platt rad
-        # ("models/x.py") matchar BARA om modulnamnet inte är känt — annars
-        # skulle en rad för en modul tysta samma filnamn i en annan modul.
+        # The allow-list is module-qualified: "module/models/x.py". A flat
+        # line ("models/x.py") matches ONLY when the module name is unknown --
+        # otherwise one module's line would silence the same filename in
+        # another module.
         allowed = f"{os.path.basename(root)}/{relpath}" in allow
 
         if target is not None:                                  # en p-fil
@@ -473,16 +478,17 @@ def check_root(root, version, exclude_allow, preprocess, tmpdir):
             except OSError as exc:
                 findings.append((ERR, "STALE", rel(root, f), str(exc)))
                 continue
-            # Jämförelsen måste faktiskt användas. Tidigare beräknades `same`
-            # men resultatet slängdes: filen rapporterades alltid som identisk
-            # med p-filen, även när den inte var det. I --no-expand-läget var
-            # STALE därför omöjligt att få — en tyst falsk grön.
+            # The comparison must actually be used. Previously `same` was
+            # computed and then discarded: the file was always reported as
+            # identical to the p-file, even when it was not. In --no-expand
+            # mode STALE was therefore impossible to get -- a silent false
+            # green.
             if generated == origin:
                 findings.append((OK, "PAIRED", rel(root, f), "identisk med p-filen"))
             else:
                 findings.append((ERR, "STALE", rel(root, f),
-                                 f"skiljer sig från {rel(root, source)} — "
-                                 f"kör om preprocess (eller redigera p-filen, "
+                                 f"differs from {rel(root, source)} -- "
+                                 f"re-run preprocess (or edit the p-file, "
                                  f"inte utdatafilen)"))
             continue
 
@@ -490,12 +496,12 @@ def check_root(root, version, exclude_allow, preprocess, tmpdir):
             findings.append((OK, "ALLOWED", rel(root, f), "vitlistad i .pfiles-allow"))
         else:
             findings.append((ERR, "UNEXPLAINED", rel(root, f),
-                             f"{name} är varken p-fil eller genererad — döp till "
+                             f"{name} is neither a p-file nor generated -- rename it to "
                              f"{pepfile_hint(name)} "
                              f"eller vitlista i .pfiles-allow"))
 
-    # Utgåvespecifika säkerhetskontroller (2.2, 2.3, 2.4). De läggs till efter
-    # täckningskontrollen så att de alltid körs, även med --no-expand.
+    # Edition-specific security checks. Added after the coverage check so
+    # they always run, even with --no-expand.
     sec_findings, sec_info = security_findings(root, version)
     findings.extend(sec_findings)
     return findings, allow_src, allow, sec_info
@@ -505,22 +511,22 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Hitta filer som saknar p-fil.")
     ap.add_argument("paths", nargs="+", help="moduler/repon att kontrollera")
     ap.add_argument("--version", default=os.environ.get("VERSION", ""),
-                    help="Odoo-utgåva, t.ex. 18.0 (default: $VERSION)")
+                    help="Odoo edition, e.g. 18.0 (default: $VERSION)")
     ap.add_argument("--repo", default=None, help="REPO-definition (default: modulnamn)")
-    ap.add_argument("--json", action="store_true", help="maskinläsbar utdata")
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--no-expand", action="store_true",
-                    help="hoppa over expansionskontroll (bara täckning)")
+                    help="skip the expansion check (coverage only)")
     ap.add_argument("--print-allow", action="store_true",
-                    help="skriv förslag till .pfiles-allow (UNEXPLAINED → rader)")
+                    help="print suggestions for .pfiles-allow (UNEXPLAINED -> lines)")
     ap.add_argument("-q", "--quiet", action="store_true", help="bara fel")
     args = ap.parse_args(argv)
 
     if not args.version and not args.no_expand:
-        ap.error("--version krävs (eller $VERSION) — utdata beror på utgåvan")
+        ap.error("--version is required (or $VERSION) -- the output depends on the edition")
 
     roots = find_roots(args.paths, explicit=False)
     if not roots:
-        print("Hittade inga modulrötter (katalog med __manifest__.py eller *.p.py).",
+        print("Found no module roots (a directory with __manifest__.py or *.p.py).",
               file=sys.stderr)
         return 2
 
@@ -572,10 +578,10 @@ def main(argv=None):
             print(f"    → {len(missing)} vitliknande rad(er). "
                   f"Generera: pfiles-check --version {args.version} --print-allow <rot>")
         if not rows:
-            print("  (inga p-filer och inga kandidater — modulen använder inte p-filer)")
+            print("  (no p-files and no candidates -- the module does not use p-files)")
 
     if preprocess is None and not args.no_expand:
-        print("\n⚠ preprocess saknas i PATH — endast täckningskontroll gjord. "
+        print("\n⚠ preprocess not in PATH -- coverage check only. "
               "Installera: python3 -m pip install --break-system-packages preprocess", file=sys.stderr)
     return 1 if total_err else 0
 

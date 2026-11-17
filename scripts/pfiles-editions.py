@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""pfiles-editions.py — läs .pfiles-ci och skriv utgåvorna som CI behöver.
+"""pfiles-editions.py -- read .pfiles-ci and emit the editions CI needs.
 
-Workflowen behöver veta två saker: vilka utgåvor som ska köras, och vilka som
-faktiskt har en branch. Det här skriptet svarar på båda och skiljer på
-"utgåvan är avstängd" och "utgåvan är efterfrågad men grenen saknas" — det
-senare är ett konfigurationsfel, inte en trasig modul.
+The workflow needs two things: which editions to run, and which of them
+actually have a branch. This script answers both and distinguishes "the
+edition is switched off" from "the edition is requested but the branch is
+missing" -- the latter is a configuration error, not a broken module.
 
-Användning:
-    scripts/pfiles-editions.py --repo . --format json
-    scripts/pfiles-editions.py --repo . --format github-matrix
-    scripts/pfiles-editions.py --repo . --check        # bara validering
+Usage:
+    pfiles-editions.py --repo . --format json
+    pfiles-editions.py --repo . --format github-matrix
+    pfiles-editions.py --repo . --check        # validation only
 
-Utdata (--format json):
+Output (--format json):
     {"editions": ["18.0", "19.0", "20.0"], "missing_branches": [], "source": ".pfiles-ci"}
 
---format github-matrix skriver det som actions-matrix förväntar:
+--format github-matrix writes what an actions matrix expects:
     {"edition": ["18.0", "19.0", "20.0"]}
 
-Exitkoder:
-    0  konfigurationen är läsbar och alla efterfrågade grenar finns
-    2  felaktig användning
-    5  konfigurationsfel (okänd utgåva, gren saknas, trasig syntax)
+Exit codes:
+    0  the configuration is readable and every requested branch exists
+    2  invalid usage
+    5  configuration error (unknown edition, branch missing, broken syntax)
 
-Skriptet frågar git efter grenar. I CI är checkouten shallow, så workflowen
-hämtar grenarna först (fetch-depth: 0); saknas de ändå rapporteras det som
-miljöfel av workflowen, inte härifrån.
+The script asks git for branches. In CI the checkout is shallow, so the
+workflow fetches the branches first (fetch-depth: 0); if they are still
+missing the workflow reports that as an environment error, not this script.
 """
 
 import argparse
@@ -34,15 +34,16 @@ import re
 import subprocess
 import sys
 
-# Samma uppsättning som EDITION_PROFILES i pfiles-check.py. En utgåva som
-# saknas där skulle köra täckningskontrollen utan formatkontroll, vilket är
-# precis den tysta halvkontroll vi vill undvika.
+# Same set as EDITION_PROFILES in pfiles-check.py. An edition missing there
+# would run the coverage check without the format check -- exactly the silent
+# half-check we want to avoid.
 KNOWN_EDITIONS = ["18.0", "19.0", "20.0"]
 
 DEFAULT_SOURCE = ".pfiles-ci"
 
-# Repon som modulerna beror på, från 'deps:' i .pfiles-ci. Fylls av
-# parse_config() och skrivs ut i JSON-utdata så workflowen kan hämta dem.
+# The repositories the modules depend on, from 'deps:' in .pfiles-ci. Filled
+# in by parse_config() and emitted in the JSON output so the workflow can
+# clone them.
 DEPENDENCIES = []
 EDITION_RE = re.compile(r"^\d{2}\.0$")
 
@@ -53,7 +54,7 @@ def fail(msg, code=5):
 
 
 def parse_config(path):
-    """Returnera listan av utgåvor ur .pfiles-ci, eller None om filen saknas."""
+    """Return the list of editions from .pfiles-ci, or None if the file is absent."""
     if not os.path.exists(path):
         return None
     editions = []
@@ -64,32 +65,33 @@ def parse_config(path):
             if not line:
                 continue
             if ":" not in line:
-                fail("%s:%d: förväntade 'nyckel: värde', fick %r" % (path, lineno, line))
+                fail("%s:%d: expected 'key: value', got %r" % (path, lineno, line))
             key, value = line.split(":", 1)
             key, value = key.strip(), value.strip()
             if key == "deps":
-                # Repon som modulerna beror på. Hämtas av workflowen innan
-                # modulerna prövas — annars är de "oinstallerbara" av ett
-                # skenskal, eftersom grannen helt enkelt inte finns i sokvagen.
+                # The repositories the modules depend on. Cloned by the
+                # workflow before the modules are tested -- otherwise they are
+                # "uninstallable" for a false reason, because the neighbour
+                # simply is not on the addons path.
                 deps.extend(p for p in re.split(r"[\s,]+", value) if p)
                 continue
             if key != "editions":
-                # pfiles-ci: 1 är en versionsmarkör, inte en utgåva.
+                # pfiles-ci: 1 is a format marker, not an edition.
                 continue
             parts = [p for p in re.split(r"[\s,]+", value) if p]
             if not parts:
-                fail("%s:%d: 'editions:' är tomt" % (path, lineno))
+                fail("%s:%d: 'editions:' is empty" % (path, lineno))
             for part in parts:
                 if not EDITION_RE.match(part):
                     fail(
-                        "%s:%d: %r är inte en utgåva (väntade t.ex. 18.0)"
+                        "%s:%d: %r is not an edition (expected e.g. 18.0)"
                         % (path, lineno, part)
                     )
                 editions.append(part)
     if not editions:
         fail("%s: ingen 'editions:'-rad hittades" % path)
     DEPENDENCIES[:] = deps
-    # Behåll ordning men ta bort dubbletter.
+    # Keep the order but drop duplicates.
     seen, unique = set(), []
     for e in editions:
         if e not in seen:
@@ -99,14 +101,14 @@ def parse_config(path):
 
 
 def branches(repo):
-    """Lokala och remote-spårade grennamn, utan 'origin/'-prefix."""
+    """Local and remote-tracking branch names, without the 'origin/' prefix."""
     try:
         out = subprocess.run(
             ["git", "-C", repo, "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes"],
             capture_output=True, text=True, check=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
-        fail("kunde inte läsa grenar ur %s: %s" % (repo, exc))
+        fail("could not read branches from %s: %s" % (repo, exc))
     names = set()
     for line in out.splitlines():
         line = line.strip()
@@ -117,15 +119,15 @@ def branches(repo):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Läs .pfiles-ci och skriv utgåvorna.")
-    ap.add_argument("--repo", default=".", help="repo att läsa konfigurationen ur")
+    ap = argparse.ArgumentParser(description="Read .pfiles-ci and emit the editions.")
+    ap.add_argument("--repo", default=".", help="repository to read the configuration from")
     ap.add_argument("--source", default=DEFAULT_SOURCE, help="konfigurationsfil (default .pfiles-ci)")
     ap.add_argument("--format", choices=["json", "github-matrix", "lines"], default="json")
     ap.add_argument("--check", action="store_true", help="validera och avsluta (inget matrisutdata)")
     ap.add_argument(
         "--allow-missing-branches",
         action="store_true",
-        help="rapportera saknade grenar men avsluta 0 (för lokal körning)",
+        help="report missing branches but exit 0 (for local runs)",
     )
     args = ap.parse_args()
 
@@ -136,22 +138,22 @@ def main():
     have = branches(args.repo)
 
     if configured is None:
-        # Ingen konfigurationsfil: härled ur de utgåvegernar som faktiskt finns
-        # i repot. Det gör att ett repo med bara 18.0 kör 18.0 utan att någon
-        # behöver skriva en konfiguration (spec: "Repo med färre utgåvor").
-        # Att i stället anta samtliga kända utgåvor skulle fälla varje sådant
-        # repo på en gren som aldrig funnits.
+        # No configuration file: derive from the edition branches that
+        # actually exist in the repo. A repo with only 18.0 then runs 18.0
+        # without anyone writing a configuration (spec: "Repo with fewer
+        # editions"). Assuming every known edition instead would fail every
+        # such repo on a branch that never existed.
         configured = [e for e in KNOWN_EDITIONS if e in have]
         if not configured:
             fail(
-                "ingen .pfiles-ci och ingen utgåvegern (18.0/19.0/20.0) hittades "
-                "i %s — kan inte avgöra vilka utgåvor som ska köras" % args.repo
+                "no .pfiles-ci and no edition branch (18.0/19.0/20.0) found "
+                "in %s -- cannot determine which editions to run" % args.repo
             )
 
     unknown = [e for e in configured if e not in KNOWN_EDITIONS]
     if unknown:
         fail(
-            "utgåva %s finns inte i pfiles-check.py (kända: %s)"
+            "edition %s is not known to pfiles-check.py (known: %s)"
             % (", ".join(unknown), ", ".join(KNOWN_EDITIONS))
         )
 
@@ -170,9 +172,9 @@ def main():
 
     if missing and not args.allow_missing_branches:
         fail(
-            "utgåva %s är konfigurerad i %s men grenen finns inte — "
-            "ta bort utgåvan ur %s eller skapa grenen. "
-            "Detta är ett konfigurationsfel, inte en trasig modul."
+            "edition %s is configured in %s but the branch does not exist -- "
+            "remove the edition from %s or create the branch. "
+            "This is a configuration error, not a broken module."
             % (", ".join(missing), source, source)
         )
     return 0

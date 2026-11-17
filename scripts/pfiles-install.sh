@@ -1,35 +1,36 @@
 #!/usr/bin/env bash
 #
-# pfiles-install.sh — installera en expanderad modul i rätt Odoo-utgåva.
+# pfiles-install.sh -- install an expanded module in the right Odoo edition.
 #
-# Steg 3 i CI. Skiljer medvetet på tre utfall, eftersom de kräver olika åtgärd:
+# The install gate. Deliberately separates three outcomes, because they need
+# different action:
 #
 #   OK        modulen installerades (rc=0)
 #   MODULE    Odoo startade men modulen gick inte att ladda  -> trasig modul
-#   ENV       Odoo gick inte att starta alls                 -> miljöfel
+#   ENV       Odoo could not start at all                    -> environment error
 #
-# Skillnaden är spec:ens krav "Saknad testmiljö skiljs från trasig modul". En
-# trasig modul ska peka ut modulen; ett miljöfel ska peka ut miljön och inte
-# anklaga koden.
+# The distinction is the spec's requirement "a missing test environment is
+# told apart from a broken module". A broken module must point at the module;
+# an environment error must point at the environment and not blame the code.
 #
-# Användning:
-#   .github/pfiles-install.sh <utgåva> <modulkatalog> [modulnamn]
+# Usage:
+#   pfiles-install.sh <edition> <module-dir> [module-name]
 #
-# Miljö:
-#   PFILES_OCB_SRC   befintligt OCB-repo (lokal körning). Saknas den klonas
+# Environment:
+#   PFILES_OCB_SRC   existing OCB repo (local runs). When absent, OCB is
 #                    OCB shallow till PFILES_OCB_CACHE.
 #   PFILES_OCB_CACHE katalog att klona till (default /tmp/pfiles-ocb)
-#   PFILES_EXTRA_ADDONS  kolon-separerad lista av extra addons-kataloger
-#                    (t.ex. ett odoo-base-arbetsträd med beroenden som inte
-#                    finns i OCB). Saknade beroenden är ett miljöfel, inte en
-#                    trasig modul.
-#   PFILES_DB_NAME   databas (default pfiles_ci_<utgåva>)
+#   PFILES_EXTRA_ADDONS  colon-separated list of extra addons directories
+#                    (e.g. an odoo-base worktree holding dependencies that are
+#                    not in OCB). Missing dependencies are an environment
+#                    error, not a broken module.
+#   PFILES_DB_NAME   database (default pfiles_ci_<edition>)
 #   PFILES_DB_USER / PFILES_DB_PASSWORD  roll (default odoo / pfiles-scratch)
 #
 # Exitkoder:
 #   0  OK
-#   2  felaktig användning
-#   4  ENV  — Odoo/OCB/databas gick inte att få igång
+#   2  invalid usage
+#   4  ENV  -- Odoo/OCB/database could not be started
 #   6  MODULE — modulen laddades inte
 #
 set -euo pipefail
@@ -38,10 +39,10 @@ VERSION="${1:-}"
 MODDIR="${2:-}"
 MODNAME="${3:-}"
 [ -n "$VERSION" ] && [ -n "$MODDIR" ] || {
-  echo "pfiles-install: användning: pfiles-install.sh <utgåva> <modulkatalog> [modulnamn]" >&2
+  echo "pfiles-install: usage: pfiles-install.sh <edition> <module-dir> [module-name]" >&2
   exit 2
 }
-[[ "$VERSION" =~ ^[0-9]{2}\.0$ ]] || { echo "pfiles-install: utgåvan måste se ut som 20.0" >&2; exit 2; }
+[[ "$VERSION" =~ ^[0-9]{2}\.0$ ]] || { echo "pfiles-install: the edition must look like 20.0" >&2; exit 2; }
 
 MODDIR="$(cd "$MODDIR" && pwd)"
 MODNAME="${MODNAME:-$(basename "$MODDIR")}"
@@ -51,7 +52,7 @@ log()  { echo "pfiles-install: $*" >&2; }
 env_fail() { echo "pfiles-install: ENV: $*" >&2; exit 4; }
 mod_fail() { echo "pfiles-install: MODULE: $*" >&2; exit 6; }
 
-# --- Odoo-källa -----------------------------------------------------------
+# --- Odoo source ----------------------------------------------------------
 
 OCB_SRC="${PFILES_OCB_SRC:-}"
 OCB_CACHE="${PFILES_OCB_CACHE:-/tmp/pfiles-ocb}"
@@ -68,71 +69,74 @@ if [ -z "$OCB_SRC" ]; then
     mkdir -p "$OCB_CACHE"
     if ! timeout 900 git clone --quiet --depth 1 --branch "$VERSION" \
           https://github.com/OCA/OCB.git "$repo" 2>&1 | sed 's/^/pfiles-install: git: /' >&2; then
-      env_fail "kunde inte klona OCB $VERSION — är nätverket/branchen tillgänglig?"
+      env_fail "could not clone OCB $VERSION -- is the network/branch reachable?"
     fi
   else
-    log "återanvänder OCB-klon $repo"
+    log "reusing OCB clone $repo"
   fi
   OCB_SRC="$repo"
 fi
 
 [ -x "$OCB_SRC/odoo-bin" ] || env_fail "odoo-bin saknas i $OCB_SRC"
 
-# Behåll en ärvd PYTHONPATH. Att sätta PYTHONPATH="$OCB_SRC" ensamt ERSÄTTER
-# den, och då tappar Odoo de paket som ligger i site-packages (babel, jinja2).
-# Felet ser ut som "fel utgåva skulle köras" eftersom --version kraschar.
+# Keep an inherited PYTHONPATH. Setting PYTHONPATH="$OCB_SRC" alone REPLACES
+# it, and Odoo then loses the packages in site-packages (babel, jinja2). The
+# failure reads as "wrong edition would run" because --version crashes.
 ODOO_PYPATH="$OCB_SRC${PYTHONPATH:+:$PYTHONPATH}"
 
 # PEP420: OCB 19/20 skeppar odoo/init.py men ingen odoo/__init__.py. Utan
-# symlänken importeras den systeminstallerade Odoo i stället — tyst, och
-# felen man ser pekar på fel sak.
+# the symlink the system-installed Odoo is imported instead -- silently, and
+# the errors you see point at the wrong thing.
 #
-# Länken läggs ENDAST på ett träd vi själva hämtade i den här körningen. Ett
-# befintligt träd (lokal utveckling, återanvänd cache) lämnas orört: har
-# någon tagit bort länken där ska assertionen nedan FALLA, inte reparera tyst.
+# The link is placed ONLY in a tree we fetched ourselves in this run. An
+# existing tree (local development, reused cache) is left untouched: if
+# someone removed the link there the assertion below must FAIL, not repair
+# silently.
 # Samma princip som --fix i scripts/pfiles-ocb.sh.
-# Länken läggs när trädet är VÅRT (klonat eller cachet av det här skriptet).
-# Ett träd användaren pekat ut med PFILES_OCB_SRC lämnas orört: där ska en
-# borttagen länk fällas av assertionen nedan, inte lagas tyst — annars kan
-# utvecklaren aldrig upptäcka att den egna miljön kör fel utgåva.
+# The link is placed when the tree is OURS (cloned or cached by this script).
+# A tree the user pointed at with PFILES_OCB_SRC is left untouched: there a
+# removed link must fail the assertion below, not be repaired silently --
+# otherwise the developer can never discover that their own environment runs
+# the wrong edition.
 if [ "$user_supplied" -eq 0 ] && [ -f "$OCB_SRC/odoo/init.py" ] && [ ! -e "$OCB_SRC/odoo/__init__.py" ]; then
-  log "lägger symlänk odoo/__init__.py -> init.py (PEP420-fix)"
-  ln -sfn init.py "$OCB_SRC/odoo/__init__.py" || env_fail "kunde inte lägga PEP420-symlänken"
+  log "adding symlink odoo/__init__.py -> init.py (PEP420 fix)"
+  ln -sfn init.py "$OCB_SRC/odoo/__init__.py" || env_fail "could not create the PEP420 symlink"
 fi
 
-# --- hård versionsassertion ----------------------------------------------
-# Utan denna kan hela steget köra 18.0 och rapportera 20.0-fel som aldrig fanns.
+# --- hard version assertion ----------------------------------------------
+# Without it the whole step can run 18.0 and report 20.0 errors that never existed.
 actual="$(PYTHONPATH="$ODOO_PYPATH" python3 "$OCB_SRC/odoo-bin" --version 2>&1 | tail -1 || true)"
 series="$(printf '%s' "$actual" | grep -oE '[0-9]{2}\.0' | head -1 || true)"
 if [ "$series" != "$VERSION" ]; then
-  env_fail "fel utgåva skulle köras: begärde $VERSION, fick '${series:-okänt}' ($actual)"
+  env_fail "wrong edition would run: asked for $VERSION, got '${series:-unknown}' ($actual)"
 fi
 log "Odoo $series i $OCB_SRC"
 
 # --- databas --------------------------------------------------------------
-# Peer-auth fungerar inte för shell-användaren; vi använder alltid TCP med
-# explicit roll. Skapas databasen redan av workflowen återanvänds den.
+# Peer auth does not work for the shell user; we always use TCP with an
+# explicit role. If the database is already created by the workflow it is
+# reused.
 DB="${PFILES_DB_NAME:-pfiles_ci_${VERSION//./_}}"
 
 DB_USER="${PFILES_DB_USER:-odoo}"
 DB_PASS="${PFILES_DB_PASSWORD:-pfiles-scratch}"
 
-# En modul ska prövas i en REN databas. Annars ärver den grannmodulers
-# halva installationer och fälls för fel som inte är dess eget — ett
-# modulfel som i själva verket är ett testmetodfel. Workflowen sätter
-# PFILES_DB_FRESH=1 och får då en ny databas per modul.
+# A module must be tested in a CLEAN database. Otherwise it inherits the
+# neighbours' half-finished installations and fails for defects that are not
+# its own -- a module failure that is really a test-method failure. The
+# workflow sets PFILES_DB_FRESH=1 and gets a fresh database per module.
 if [ "${PFILES_DB_FRESH:-0}" = "1" ]; then
-  # Utan psql-klient kan vi inte garantera en ren databas. Att då köra vidare
-  # mot en databas som redan har grannmodulerna installerade ger falskt grönt:
-  # en trasig modul "installeras" utan att något laddas, eftersom Odoo hoppar
-  # över en modul som redan står som installerad. Det hände på en runner utan
+  # Without a psql client we cannot guarantee a clean database. Carrying on
+  # against a database that already has the neighbours installed gives a
+  # false green: a broken module is "installed" without anything loading,
+  # because Odoo skips a module already marked installed. That happened on a
   # psql — linkedin_contacts med en trasig xpath rapporterades som OK.
   command -v psql >/dev/null \
-    || env_fail "PFILES_DB_FRESH=1 men psql saknas — kan inte skapa en ren databas (miljöfel)"
-  # Anslut som superuser över TCP. I CI är postgres en service-container där
-  # rollen i POSTGRES_USER redan är superuser; lokalt krävs sudo -u postgres
-  # eftersom shell-användaren saknar roll. Vi provar sudo först och faller
-  # tillbaka på TCP, så samma skript fungerar på båda ställena.
+    || env_fail "PFILES_DB_FRESH=1 but psql is missing -- cannot create a clean database (environment error)"
+  # Connect as superuser over TCP. In CI postgres is a service container where
+  # the POSTGRES_USER role is already superuser; locally sudo -u postgres is
+  # needed because the shell user has no role. We try sudo first and fall
+  # back to TCP, so the same script works in both places.
   psql_admin() {
     if sudo -n -u postgres psql -v ON_ERROR_STOP=1 -tAc "SELECT 1" >/dev/null 2>&1; then
       sudo -n -u postgres psql -v ON_ERROR_STOP=1 -tAc "$1"
@@ -161,13 +165,13 @@ if [ "${PFILES_DB_FRESH:-0}" = "1" ]; then
     psql_admin "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='$DB'" >/dev/null 2>&1 || true
     psql_admin "DROP DATABASE IF EXISTS \"$DB\" WITH (FORCE)" >/dev/null 2>&1 || true
     still_there="$(psql_admin "SELECT 1 FROM pg_database WHERE datname='$DB'" 2>/dev/null | tr -d ' ' || true)"
-    [ -z "$still_there" ] || env_fail "kunde inte ta bort databasen $DB (miljöfel)"
+    [ -z "$still_there" ] || env_fail "could not drop database $DB (environment error)"
   fi
   if ! psql_admin "CREATE DATABASE \"$DB\" OWNER \"$DB_USER\"" >/dev/null 2>&1; then
     # Visa VARFOR det gick fel, inte bara att det gick fel. Utan orsaken gar
     # det inte att skilja en trasig miljo fran en trasig grind.
     why="$(psql_admin "CREATE DATABASE \"$DB\" OWNER \"$DB_USER\"" 2>&1 | head -2 | tr '\n' ' ')"
-    env_fail "kunde inte skapa en ren databas $DB (miljöfel): $why"
+    env_fail "could not create a clean database $DB (environment error): $why"
   fi
   psql_admin "ALTER ROLE \"$DB_USER\" WITH PASSWORD '$DB_PASS'" >/dev/null 2>&1 || true
 
@@ -191,21 +195,21 @@ if [ "${PFILES_DB_FRESH:-0}" = "1" ]; then
 fi
 
 if command -v pg_isready >/dev/null; then
-  pg_isready -q -h 127.0.0.1 || env_fail "PostgreSQL svarar inte på 127.0.0.1 (miljöfel)"
+  pg_isready -q -h 127.0.0.1 || env_fail "PostgreSQL is not responding on 127.0.0.1 (environment error)"
 fi
 
-# --- kör ------------------------------------------------------------------
-# Vi kör i en kopia av modulkatalogen: Odoo skriver __pycache__ och kan i
-# värsta fall skapa filer bredvid modulen, och CI-trädet ska förbli orört så
-# att nästa utgåvas jämförelse inte påverkas.
+# --- run ------------------------------------------------------------------
+# We run against a copy of the module directory: Odoo writes __pycache__ and
+# can in the worst case create files next to the module, and the CI tree must
+# stay untouched so the next edition's comparison is not affected.
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 addons="$work/addons"
 mkdir -p "$addons"
 cp -a "$MODDIR" "$addons/$MODNAME"
 
-# Extra addons-kataloger (beroenden som bor utanför OCB). De läggs efter
-# modulens egen katalog men före OCB:s, så en lokal kopia vinner över en
+# Extra addons directories (dependencies living outside OCB). They are placed
+# after the module's own directory but before OCB's, so a local copy wins over a
 # eventuell OCB-version med samma namn.
 addons_path="$addons"
 if [ -n "${PFILES_EXTRA_ADDONS:-}" ]; then
@@ -233,8 +237,8 @@ rc=$?
 set -e
 
 if [ "$rc" -eq 0 ]; then
-  # rc=0 är inte nog: Odoo kan logga felet och ändå avsluta noll. Kontrollera
-  # att modulen verkligen står som installerad, annars godkänner vi tyst en
+  # rc=0 is not enough: Odoo can log the error and still exit zero. Check
+  # that the module really is installed, otherwise we silently approve a
   # modul som inte laddades.
   # Las modulens state ur databasen. Vi fragar efter en MARKOR i utdata i
   # stallet for att lita pa sista raden: odoo-bin shell skriver en banner och
@@ -292,33 +296,34 @@ PYDEPS
   exit 0
 fi
 
-# Ett saknat BEROENDE är ett miljöfel: modulen är inte trasig, det är
+# A missing DEPENDENCY is an environment error: the module is not broken, it is
 # testsviten som inte fick med sig beroendet. Att klassa det som MODULE
 # skickar utvecklaren att leta fel i sin egen kod.
-# Odoo delar upp meddelandet på TVÅ rader:
+# Odoo splits the message across TWO lines:
 #   You try to install module "x" that depends on module "y".
 #   But the latter module is not available in your system.
-# Ett grep efter hela frasen på en rad matchar därför aldrig — det var
-# felet som först klassade saknade beroenden som trasiga moduler.
+# A grep for the whole phrase on one line therefore never matches -- that was
+# the defect that first classified missing dependencies as broken modules.
 if grep -qF 'But the latter module is not available' "$logfile"; then
   missing="$(grep -oE 'depends on module "[^"]+"' "$logfile" | head -1 | sed 's/.*"\(.*\)"/\1/')"
   tail -20 "$logfile" >&2
-  env_fail "beroendet '${missing:-okänt}' finns inte i addons-path — lägg till det med PFILES_EXTRA_ADDONS (miljöfel, inte modulfel)"
+  env_fail "dependency '${missing:-unknown}' is not on the addons path -- add it with PFILES_EXTRA_ADDONS (environment error, not a module error)"
 fi
 
-# Skilj miljöfel från modulfel. En modul som inte kan laddas ger typiskt
-# KeyError/ParseError/ValueError med modulnamnet i spåret, och Odoo hinner
-# starta registret. Ett miljöfel (DB nekar, port stängd, fel lösenord) syns
+# Tell environment errors from module errors. A module that cannot load
+# typically gives KeyError/ParseError/ValueError with the module name in the
+# trace, and Odoo gets as far as starting the registry. An environment error
+# (DB refuses, port closed, wrong password) shows up
 # som anslutningsfel INNAN registret laddas.
 if grep -qE "could not connect|Connection refused|password authentication failed|FATAL:|database .* does not exist|psycopg2.OperationalError" "$logfile"; then
   tail -30 "$logfile" >&2
-  env_fail "kunde inte ansluta till databasen $DB (miljöfel, inte modulfel)"
+  env_fail "could not connect to database $DB (environment error, not a module error)"
 fi
 
 if grep -qE "CRITICAL.*Failed to (load|initialize) (registry|database)|Failed to initialize database" "$logfile"; then
   tail -40 "$logfile" >&2
-  mod_fail "$MODNAME kunde inte laddas i $VERSION (rc=$rc) — se spåret ovan"
+  mod_fail "$MODNAME could not be loaded in $VERSION (rc=$rc) -- see the trace above"
 fi
 
 tail -40 "$logfile" >&2
-mod_fail "$MODNAME gav rc=$rc i $VERSION och kunde inte klassas som miljöfel"
+mod_fail "$MODNAME returned rc=$rc in $VERSION and could not be classified as an environment error"
