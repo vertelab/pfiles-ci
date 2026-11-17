@@ -32,5 +32,13 @@ jobs:
           bash -n scripts/pfiles-install.sh
           echo "syntax OK"
 
+      - name: Lint the workflows
+        # Catches a class of error YAML accepts but GitHub rejects: a
+        # duplicate key, an empty jobs: section. When that happens the caller
+        # produces zero jobs and no check run, so nothing points at the file.
+        run: |
+          bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color .github/workflows/*.yml
+
       - name: Run the tests
         run: python3 tests/test_pfiles.py
