@@ -207,8 +207,21 @@ def apply(repo, branches, source, push):
         else:
             sha = git(work, "rev-parse", "--short", "HEAD").stdout.strip()
             changed[branch] = "%s (%d files)" % (sha, len(todo))
+            # The commit lives on a detached HEAD inside a temporary worktree
+            # that is removed below. Without moving the branch, the commit is
+            # unreachable and is garbage-collected -- the sync reports success
+            # and changes nothing. Always advance the local branch.
+            full = git(work, "rev-parse", "HEAD").stdout.strip()
+            mv = git(repo, "branch", "-f", branch, full, check=False)
+            if mv.returncode != 0:
+                changed[branch] += " BRANCH NOT MOVED"
             if push:
-                p = git(work, "push", "origin", "HEAD:%s" % branch, check=False)
+                # Push the branch we just moved, not HEAD: HEAD lives in a
+                # temporary worktree that was checked out from origin/<branch>
+                # and is removed below. Pushing HEAD from there sent the OLD
+                # commit and left the sync commit unreachable.
+                p = git(repo, "push", "origin", "%s:refs/heads/%s" % (branch, branch),
+                        check=False)
                 changed[branch] += " pushed" if p.returncode == 0 else " PUSH FAILED"
         subprocess.run(["git", "-C", repo, "worktree", "remove", "--force", work],
                        capture_output=True)
