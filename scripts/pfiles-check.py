@@ -18,6 +18,14 @@ Edition-specific security checks (Odoo 20 changed the shape of ir.model.access):
   UNLISTED_SECURITY_FILE the manifest loads a security file the edition cannot read (ERROR)
   BAD_DOMAIN_NAME        the domain uses a name outside the edition's eval context (ERROR)
 
+Edition-specific manifest checks (Odoo compares the manifest version against the
+running series, and silently skips a module whose version does not match):
+
+  MANIFEST_VERSION       a generated __manifest__.py does not carry the edition
+                         as the version prefix -- '<edition>.<module version>'
+                         (ERROR). Only manifests with a __manifest__.p.py source
+                         are checked; a hand-written manifest is left alone.
+
 Usage:
   ./pfiles-check.py --version 18.0 /path/to/module [...]
   ./pfiles-check.py --version 18.0 --json /path/to/repo
@@ -232,6 +240,67 @@ def csv_rows(path):
     except OSError:
         return []
     return [r for r in rows[1:] if r and any(c.strip() for c in r)]
+
+
+VERSION_RE = re.compile(r"""['\"]version['\"]\s*:\s*['\"]([^'\"]+)['\"]""")
+MODULE_VERSION_RE = re.compile(r"^\d+(\.\d+)*$")
+
+
+def manifest_version_findings(root, version):
+    """The manifest version must carry the edition as its prefix.
+
+    Odoo reads the series from the string before the first dot and silently
+    skips a module whose series does not match the running one. A p-file that
+    says '1.0' on every edition therefore gives an uncomparable version and
+    makes migration scripts impossible to match per edition.
+
+    Only generated manifests are checked: a hand-written __manifest__.py has no
+    p-source and is somebody else's decision. The version is read with a regex,
+    not ast.literal_eval -- a manifest that references __file__ must not become
+    a *version* error.
+
+    Returns (findings, info) where info is a dict for --json.
+    """
+    info = {"present": False, "version": None, "generated": False}
+    path = os.path.join(root, "__manifest__.py")
+    if not os.path.isfile(path):
+        return [], info
+    info["present"] = True
+    if not os.path.isfile(os.path.join(root, "__manifest__.p.py")):
+        return [], info            # hand-written manifest: not our business
+    info["generated"] = True
+
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as exc:
+        return [(ERR, "MANIFEST_VERSION", "__manifest__.py",
+                 f"cannot read the manifest: {exc}")], info
+
+    match = VERSION_RE.search(text)
+    if match is None:
+        return [(ERR, "MANIFEST_VERSION", "__manifest__.py",
+                 "the manifest has no version -- Odoo then assumes 1.0, which "
+                 f"carries no edition (expected {version}.<module version>)")], info
+
+    found = match.group(1).strip()
+    info["version"] = found
+    # The series is everything before the module version; an edition is
+    # always '<major>.<minor>' (18.0, 20.0), so it cannot be split on the
+    # first dot without turning 18.0.1.0 into series '18'.
+    parts = found.split(".")
+    series = ".".join(parts[:2])
+    module_version = ".".join(parts[2:])
+
+    if series != version:
+        return [(ERR, "MANIFEST_VERSION", "__manifest__.py",
+                 f"version '{found}' names series '{series}' -- expected {version} "
+                 f"(the form is <edition>.<module version>, e.g. {version}.1.0)")], info
+    if not module_version or not MODULE_VERSION_RE.match(module_version):
+        return [(ERR, "MANIFEST_VERSION", "__manifest__.py",
+                 f"version '{found}' has no module version after the edition -- "
+                 f"the form is <edition>.<module version>, e.g. {version}.1.0")], info
+    return [], info
 
 
 def security_findings(root, version):
@@ -504,6 +573,8 @@ def check_root(root, version, exclude_allow, preprocess, tmpdir):
     # they always run, even with --no-expand.
     sec_findings, sec_info = security_findings(root, version)
     findings.extend(sec_findings)
+    sec_info["manifest_version"] = manifest_version_findings(root, version)
+    findings.extend(sec_info["manifest_version"][0])
     return findings, allow_src, allow, sec_info
 
 

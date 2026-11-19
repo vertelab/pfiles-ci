@@ -33,6 +33,7 @@ def load(name):
 
 
 check_mod = load("pfiles-check.py")
+manifest_mod = load("pfiles-manifest-version.py")
 editions_mod = load("pfiles-editions.py")
 expand_mod = load("pfiles-expand.py")
 sync_mod = load("pfiles-sync.py")
@@ -196,6 +197,181 @@ class TestSecurityFindings(unittest.TestCase):
         f = self._findings("20.0", "ir.access.csv", self.MODERN + "\n" + row)
         self.assertIn("BAD_DOMAIN_NAME", [x[1] for x in f],
                       "uid stranded after a comma must still be found")
+
+
+class TestManifestVersion(unittest.TestCase):
+    """A generated manifest must carry the edition as its version prefix."""
+
+    def setUp(self):
+        self.repo = Repo()
+
+    def tearDown(self):
+        self.repo.cleanup()
+
+    def _check(self, version, generated, source=None):
+        root = os.path.join(self.repo.path, "mod")
+        self.repo.write("mod/__init__.py", "")
+        if source is not None:
+            self.repo.write("mod/__manifest__.p.py", source)
+        self.repo.write("mod/__manifest__.py", generated)
+        return check_mod.manifest_version_findings(root, version)
+
+    def test_missing_prefix_fails(self):
+        f, info = self._check("18.0",
+                              "{'name': 'M', 'version': '1.0'}",
+                              "{'name': 'M', 'version': '1.0'}")
+        self.assertEqual([x[1] for x in f], ["MANIFEST_VERSION"])
+        self.assertIn("expected 18.0", f[0][3])
+        self.assertEqual(info["version"], "1.0")
+
+    def test_foreign_prefix_names_both_series(self):
+        f, _ = self._check("18.0",
+                           "{'name': 'M', 'version': '20.0.1.0'}",
+                           "{'name': 'M', 'version': '1.0'}")
+        self.assertEqual([x[1] for x in f], ["MANIFEST_VERSION"])
+        self.assertIn("20.0", f[0][3])
+        self.assertIn("18.0", f[0][3])
+
+    def test_series_without_module_version_fails(self):
+        f, _ = self._check("18.0",
+                           "{'name': 'M', 'version': '18.0'}",
+                           "{'name': 'M', 'version': '1.0'}")
+        self.assertEqual([x[1] for x in f], ["MANIFEST_VERSION"])
+        self.assertIn("module version", f[0][3])
+
+    def test_correct_chain_passes_on_each_edition(self):
+        # The real p-file: the expansion picks the line for the edition.
+        source = textwrap.dedent("""\
+            {
+                'name': 'M',
+                # #if VERSION == "20.0"
+                'version': '20.0.1.0',
+                # #elif VERSION == "19.0"
+                'version': '19.0.1.0',
+                # #elif VERSION == "18.0"
+                'version': '18.0.1.0',
+                # #else
+                'version': '20.0.1.0',
+                # #endif
+            }
+            """)
+        self.repo.write("mod/__init__.py", "")
+        self.repo.write("mod/__manifest__.p.py", source)
+        have_preprocess = shutil.which("preprocess") is not None
+        for edition in ("18.0", "19.0", "20.0"):
+            if have_preprocess:
+                out = subprocess.run(
+                    ["preprocess", "-D", "VERSION=" + edition,
+                     os.path.join(self.repo.path, "mod", "__manifest__.p.py")],
+                    capture_output=True, text=True, check=True).stdout
+                self.repo.write("mod/__manifest__.py", out)
+            else:
+                self.repo.write("mod/__manifest__.py",
+                                "{'name': 'M', 'version': '%s.1.0'}" % edition)
+            f, info = check_mod.manifest_version_findings(
+                os.path.join(self.repo.path, "mod"), edition)
+            self.assertEqual(f, [], "%s: %s" % (edition, f))
+            self.assertEqual(info["version"], "%s.1.0" % edition)
+
+    def test_hand_written_manifest_is_left_alone(self):
+        # No p-source: the manifest is the source itself.
+        f, info = self._check("18.0", "{'name': 'M', 'version': '1.0'}")
+        self.assertEqual(f, [])
+        self.assertFalse(info["generated"])
+
+    def test_no_expand_still_checks_the_committed_manifest(self):
+        self.repo.write("mod/__init__.py", "")
+        self.repo.write("mod/__manifest__.p.py", "{'name': 'M', 'version': '1.0'}")
+        self.repo.write("mod/__manifest__.py", "{'name': 'M', 'version': '1.0'}")
+        proc = subprocess.run(
+            [sys.executable, os.path.join(SCRIPTS, "pfiles-check.py"),
+             "--version", "18.0", "--no-expand", os.path.join(self.repo.path, "mod")],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("MANIFEST_VERSION", proc.stdout)
+
+    def test_manifest_without_version_fails(self):
+        f, _ = self._check("18.0", "{'name': 'M'}",
+                           "{'name': 'M', 'version': '1.0'}")
+        self.assertEqual([x[1] for x in f], ["MANIFEST_VERSION"])
+        self.assertIn("no version", f[0][3])
+
+    def test_version_outside_a_string_is_not_a_crash(self):
+        # The regex must not need a literal manifest.
+        f, _ = self._check("18.0",
+                           "{'name': 'M', 'data': open(__file__).read(), "
+                           "'version': '18.0.2.1'}",
+                           "{'name': 'M', 'version': '1.0'}")
+        self.assertEqual(f, [])
+
+
+class TestManifestMigration(unittest.TestCase):
+    """The migration script: rewrite the version line, idempotent, --check."""
+
+    def setUp(self):
+        self.repo = Repo()
+        self.repo.write(".pfiles-ci", "pfiles-ci: 1\neditions: 18.0 19.0 20.0\n")
+
+    def tearDown(self):
+        self.repo.cleanup()
+
+    def _manifest(self, root="mod", body=None):
+        self.repo.write(root + "/__init__.py", "")
+        self.repo.write(root + "/__manifest__.p.py",
+                        body if body is not None else
+                        "{'name': 'M', 'version': '1.0'}")
+        return os.path.join(self.repo.path, root, "__manifest__.p.py")
+
+    def test_module_version_from_plain_1_0(self):
+        self.assertEqual(manifest_mod.module_version("1.0", ["18.0", "20.0"]), "1.0")
+
+    def test_module_version_from_bare_series(self):
+        self.assertEqual(manifest_mod.module_version("17.0", ["18.0", "20.0"]), "1.0")
+
+    def test_module_version_strips_a_known_series(self):
+        self.assertEqual(manifest_mod.module_version("17.0.2.1", ["17.0", "20.0"]), "2.1")
+
+    def test_module_version_keeps_a_four_part_version(self):
+        self.assertEqual(manifest_mod.module_version("1.0.1", ["18.0"]), "1.0.1")
+
+    def test_check_reports_without_touching_the_file(self):
+        path = self._manifest()
+        before = open(path, encoding="utf-8").read()
+        self.assertEqual(manifest_mod.main(["--repo", self.repo.path, "--check"]), 1)
+        self.assertEqual(open(path, encoding="utf-8").read(), before)
+
+    def test_apply_writes_one_branch_per_series(self):
+        path = self._manifest()
+        manifest_mod.main(["--repo", self.repo.path, "--apply"])
+        text = open(path, encoding="utf-8").read()
+        for edition in ("18.0", "19.0", "20.0"):
+            self.assertIn("'version': '%s.1.0'" % edition, text)
+        self.assertIn('# #if VERSION == "20.0"', text)
+        self.assertIn('# #else', text)
+
+    def test_apply_is_idempotent(self):
+        self._manifest()
+        manifest_mod.main(["--repo", self.repo.path, "--apply"])
+        path = os.path.join(self.repo.path, "mod", "__manifest__.p.py")
+        once = open(path, encoding="utf-8").read()
+        self.assertEqual(manifest_mod.main(["--repo", self.repo.path, "--check"]), 0)
+        manifest_mod.main(["--repo", self.repo.path, "--apply"])
+        self.assertEqual(open(path, encoding="utf-8").read(), once,
+                         "a second run must not stack a new chain")
+
+    def test_series_written_highest_first(self):
+        block = manifest_mod.build_chain("    ", "'", "1.0", ["18.0", "20.0", "19.0"])
+        order = [ln for ln in block.splitlines() if "VERSION" in ln]
+        self.assertIn("20.0", order[0])
+        self.assertIn("19.0", order[1])
+        self.assertIn("18.0", order[2])
+
+    def test_missing_series_is_a_usage_error(self):
+        self.repo.write("mod/__init__.py", "")
+        self.repo.write("mod/__manifest__.p.py", "{'name': 'M', 'version': '1.0'}")
+        os.remove(os.path.join(self.repo.path, ".pfiles-ci"))
+        with self.assertRaises(SystemExit):
+            manifest_mod.main(["--repo", self.repo.path, "--check"])
 
 
 class TestEditionsConfig(unittest.TestCase):
